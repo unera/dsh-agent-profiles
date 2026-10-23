@@ -52,8 +52,8 @@ dsh plugin add "link:<你的目录>/dsh-agent-profiles"
 
 ![设置页](docs/settings-page.png)
 
-*设置页：左栏配置列表（新建 / 复制 / 导入 / 导出），右栏编辑名称、头像与角色设定。*
-*The settings page: the profile list on the left, and the name / avatar / role fields on the right.*
+*设置页：顶部一行 —— 左列新建 / 复制 / 删除，中间是固定三行高的多行配置列表（多了内部滚动），右列导入 / 导出 / 恢复默认；两列高度与列表完全一致，图标按钮的提示气泡在左列向右上、右列向左上展开，删除确认出现在这一行下面；下面整宽的表单按「名称 / 角色 / 记忆 / 提示词」分页，页面底部的说明文字收进页头的「?」。*
+*The settings page: one top row — a left column with new / duplicate / delete, a multi-row profile list fixed at three rows (scrolling inside), and a right column with import / export / restore defaults. Both columns are exactly as tall as the list, tooltips open up-right from the left column and up-left from the right one, and the delete confirmation appears under the row; below it a full-width form split into Name / Role / Memory / Prompt tabs. The footer metadata moved into the “?” popover in the page header.*
 
 ### 输入框左侧的快速切换器
 
@@ -77,7 +77,7 @@ dsh plugin add "link:<你的目录>/dsh-agent-profiles"
 *Long-term memory: edit the **long-term memory entries** one by one (each with its own edit / delete), with a live "long-term memory uses 746 / 5000 characters; past the cap it is condensed automatically" readout below.*
 
 > 截图为**中文界面**下的实测界面（设置 UI 跟随宿主语言，内置中英两套词典）。
-> The screenshots show the UI in Chinese (the settings UI follows the host language; both dictionaries ship built in).
+> The screenshots show the UI in Chinese (the settings UI follows the host language; Chinese, English and Russian dictionaries ship built in, and the built-in profiles are localized per language as well).
 
 ---
 
@@ -88,13 +88,13 @@ dsh-agent-profiles/
 ├── package.json          ── ① 包清单：bundle patch + dsh.client 声明 + meta/icon
 ├── cordis.patch.yml      ── ① 装配：插入 agent-profiles 行，硬依赖 webServer
 ├── icon.svg              ── ① 插件卡片图标
-├── locale/zh.json,en.json── ② 元数据文案（宿主读插件卡片用）
+├── locale/zh,en,ru.json  ── ② 元数据文案（宿主读插件卡片用）
 └── lib/
     ├── store.js          ── ③ 数据模型 + 持久化 + 导入导出 + 变更算子
     ├── prompt.js         ── ④ 配置 → 注入文本（记忆开关、优先级声明、截断）
     ├── routes.js         ── ⑤ Host HTTP API（/__ap/*）+ index.html 脚本注入
     ├── index.js          ── ⑥ Host 入口：装配 store/prompt/routes + 注册提示词段落
-    └── client.js         ── ⑦ 浏览器半：设置页（分栏）+ 输入框快速切换器
+    └── client.js         ── ⑦ 浏览器半：设置页（选择器 + 分页）+ 输入框快速切换器
 ```
 
 ### 数据流
@@ -187,6 +187,17 @@ ctx.on("agent/created", ({ agent }) => {          // agent.id 就是 sessionId
 默认启用的「通用助手」是**填好内容**的（用户明确要求）：实事求是、简洁直白、不猜想臆想、  
 服从现行的 AI 内容规范与平台审核要求、做没做好都如实说。出厂即生效 —— 新会话里默认助手  
 就按这套说话，不用先手动配置。
+
+出厂内容是**按界面语言**的：`DEFAULT_PROFILES_ZH` / `_EN` / `_RU` 三份，字段结构完全一样。  
+「恢复默认」与「新建配置」由宿主写盘，客户端会把当前界面语言（`lang`）一起发过去，  
+所以俄语界面点「Восстановить по умолчанию」拿到的是俄语配置，不是中文。已经保存的配置  
+正文不受影响 —— 语言只决定「新造出来的东西长什么样」。
+
+**「恢复默认」只重置当前这一套配置的字段**（`name` / `icon` / `role` / `personality` / `speech` /  
+`rules` / `memorySummary` / `memories`），`id`、`activeId`、各对话的绑定和别的配置都不动 ——  
+id 没换，所以绑定也不会悬空。用哪个模板：**按名字认**（名字是唯一还留着的来源线索，  
+id 是随机的、内容用户早改过），名字在三种语言的出厂名里找得到就用同一套模板，  
+否则用第一个（通用助手）。这份记忆（摘要与条目）属于配置字段，所以也会被清空。
 
 > 早期版本这里是**刻意留空**的，理由是「装一个插件不该悄悄改变用户助手的行为」。  
 > 用户看过实际效果后明确要求给默认助手写准则，于是**有意填上**。  
@@ -635,10 +646,12 @@ agentCtx.effect(() => scopedSystemPrompt.section({ … }));
 | 安装 | `application: applied`，`warnings: []`，无构建脚本待批 |
 | 行状态 | `include:agent-profiles` → `enabled: true`, `fiberPhase: "active"` |
 | Host 启动日志 | `[agent-profiles] 就绪：3 套配置，当前「通用助手」，数据 <安装根>\.dsh-agent-profiles-data\profiles.json`，**无任何告警/报错** |
-| 数据层自测 | `test/store.test.mjs` → **176 项断言全过**（垃圾输入、损坏文件、删最后一套、导入合并撞 id、并发写、写失败回滚、上限截断、会话绑定 / 清空即删除 / 悬空绑定清理 / 按最近淘汰 / 删配置自动解绑 / 导出不含会话 / 落盘读回、注入文本三层合成，**以及头像白名单（PNG/JPEG/WebP/GIF 接受，SVG 与伪 data URL 拒绝）、长度上限、副本携带、导出携带、不进提示词**） |
+| 数据层自测 | `test/store.test.mjs` → **185 项断言全过**（垃圾输入、损坏文件、删最后一套、导入合并撞 id、并发写、写失败回滚、上限截断、会话绑定 / 清空即删除 / 悬空绑定清理 / 按最近淘汰 / 删配置自动解绑 / 导出不含会话 / 落盘读回、注入文本三层合成，**以及头像白名单（PNG/JPEG/WebP/GIF 接受，SVG 与伪 data URL 拒绝）、长度上限、副本携带、导出携带、不进提示词**） |
 | Host API 自测 | `test/routes.test.mjs` → **84 项断言全过**（真实处理器 + mock req/res：状态读取、变更分发、非法输入、413/405、同源守卫四分支、预览、导出往返、脚本投递、index 注入幂等、注销，**以及 session.set / clear / clearAll 的完整往返与拒绝路径**） |
 | **长期记忆自测** | `test/memory.test.mjs` → **70 项断言全过**：后台提炼到第 5 回合触发并写入、送进模型的摘录有长度上限、调模型失败与「压缩结果为空」都只告警不写脏数据、拿不到 `llm` / `sessionQuery` / `tools` 只降级不抛、同一会话并发触发不重复写、**写入目标必须是本对话生效的那套配置（切了配置不能写错地方）**、记忆工具的描述与渲染文案（含 `isConcurrencySafe() === false`） |
-| **界面渲染自测** | `test/client-render.test.mjs` → **124 项断言全过**：首帧非空、有数据后完整渲染、点左栏另一套配置编辑区跟着换、带 `sessionId` 时下拉与本对话面板取值、**头像三态（设了 → `<img>`；没设 → emoji 图标；`onError` → 回落到图标且不留破图）**、**助手消息条目按会话绑定取配置（未绑定回落全局）**、接口失败显示原因、错误边界兜得住、幂等栅栏生效 |
+| **界面渲染自测** | `test/client-render.test.mjs` → **311 项断言全过**：首帧非空、有数据后完整渲染、在下拉里换一套配置编辑区跟着换、带 `sessionId` 时下拉与本对话面板取值、**头像三态（设了 → `<img>`；没设 → emoji 图标；`onError` → 回落到图标且不留破图）**、**助手消息条目按会话绑定取配置（未绑定回落全局）**、接口失败显示原因、错误边界兜得住、幂等栅栏生效；**版面按结构断言**（一个 listbox 且 `size` 恒为 3、八个配置时不长高、两列各三颗按钮且顺序 new/duplicate/delete → 选择器 → import/export/restore、**两列高度与选择器来自同一个 `--ap-row-h`**（按 CSS 断言，不量像素）、六个图标按钮 title 与 aria-label 一致且删除是 ✕、导入导出是两个方向相反的文档箭头、提示气泡悬停与聚焦都出、左列向右上展开右列向左上、文本来自 `tip.*`（三种语言逐条验）、四个分页顺序固定、浮层收起时页面上没有元信息块、删除确认只有一块且在行下方、取消不发命令 / 确认只发一条 `profile.delete`；**「恢复默认」只重置当前这套配置的字段**：确认文案带配置名，请求带 `id` + `lang`，别的配置与对话绑定不动）；**英文与俄文各渲染一遍**（俄文页整页没有 CJK），未知语言回落中文，切语言不丢正在编辑的内容 |
+| **词条守卫** | `test/i18n-dicts.test.mjs` → **32 项断言全过**：三本字典键集合一致且值非空（失败信息写明 `missing ru: key` / `empty en: key`）、en/ru 值里没有 CJK、占位符集合各语言一致、代码里用到的键都在字典里、**源码里没有绕过 `tt()` 的中文字面量**（注释、字典本体、`tt(key, 兜底)` 的第二参数、诊断通道除外） |
+| **出厂默认按语言** | `test/defaults-i18n.test.mjs` → **62 项断言全过**：`zh` / `en` / `ru` 三套出厂配置字段结构一致、en/ru 内容没有 CJK、**中文那一份逐字没变**、语言不认识（含老客户端不发 `lang`）回落中文、`state.restoreDefaults` 跟着 `lang` 走、`profile.create` 的默认名按语言、已存在的配置正文不受语言影响 |
 | **Host 接线自测** | `test/host-wiring.test.mjs` → **56 项断言全过**：全局段落注册、`agent/created` 监听、**清理函数必须返回 thenable（5.3 事故点）**、**作用域段落必须落在 agent 作用域而不是插件作用域（5.5 事故点）**、拿不到 `agent.ctx` / 作用域里没有 `systemPrompt` / 注册抛错都只降级不冒泡、resume 先注销旧的、逃生开关生效、段落文本按会话取内容 |
 | **主题 token 审计** | `test/theme-tokens.test.mjs` → **12 项断言全过**：CSS 里用到的 11 个 token 全部在主题注册表内，且浮层是不透明两层写法（5.4 事故点） |
 | 机制探针 | `test/cordis-effect-probe.mjs` → 用**真 cordis** 复现宿主的销毁姿势：旧写法抛 `reading 'catch'`，新写法通过 |
@@ -646,7 +659,7 @@ agentCtx.effect(() => scopedSystemPrompt.section({ … }));
 
 **仍然要你确认的部分**：
 
-1. **我看不到页面**，也没有浏览器控制。修好的是「有没有东西」；观感（分栏比例、明暗主题）请你过一眼。
+1. **我看不到页面**，也没有浏览器控制。修好的是「有没有东西」；观感（选择器高度、分页与图标按钮的间距、明暗主题）请你过一眼。
 2. 客户端 bundle 由宿主的 clientModules 提供（其响应可被缓存），所以**新代码要刷新页面才生效**；
    若刷新后还是旧样子，**重启一次 DSH** 必定生效 —— 重启同时也会把更新过的
    dsh-knowledge / dsh-theme-pack / dsh-team-chat 的 Host 半重新加载。
@@ -672,6 +685,8 @@ $env:ELECTRON_RUN_AS_NODE = "1"
 $node = "<安装根>\DSH Desktop.exe"
 cd <本仓库>\dsh-agent-profiles
 & $node test\store.test.mjs
+& $node test\defaults-i18n.test.mjs   # 出厂默认按界面语言（不需要 react）
+& $node test\i18n-dicts.test.mjs       # 词条三语对等 + 漏译扫描（不需要 react）
 & $node test\routes.test.mjs
 & $node test\client-render.test.mjs
 & $node test\jsx-probe.mjs        # 复现 jsx-runtime 与 createElement 的签名差异
