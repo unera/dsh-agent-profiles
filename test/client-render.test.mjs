@@ -1544,7 +1544,7 @@ const serverMeta = {
       duplicate: "复制当前这套配置",
       import: "从 JSON 文件导入配置",
       export: "把全部配置导出为 JSON 文件",
-      restore: "用内置默认配置替换全部配置",
+      restore: "把当前这套配置的字段恢复成默认值",
       delete: "删除当前这套配置",
     },
     en: {
@@ -1552,7 +1552,7 @@ const serverMeta = {
       duplicate: "Copy the current profile",
       import: "Import profiles from a JSON file",
       export: "Export every profile to a JSON file",
-      restore: "Replace every profile with the built-in defaults",
+      restore: "Reset the current profile's fields to their defaults",
       delete: "Delete the current profile",
     },
     ru: {
@@ -1560,7 +1560,7 @@ const serverMeta = {
       duplicate: "Скопировать текущий профиль",
       import: "Импортировать профили из файла JSON",
       export: "Экспортировать все профили в файл JSON",
-      restore: "Заменить все профили заводскими настройками",
+      restore: "Сбросить поля текущего профиля к значениям по умолчанию",
       delete: "Удалить текущий профиль",
     },
   };
@@ -1699,6 +1699,60 @@ const serverMeta = {
   const wraps = (from, to) => flat.slice(from, to).match(/ap-act-wrap/g)?.length ?? 0;
   eq("в левой колонке три кнопки", wraps(leftAt, selectAt), 3);
   eq("в правой колонке три кнопки", wraps(rightAt), 3);
+}
+
+// ── 场景 21：кнопка «обновить» сбрасывает только текущий профиль ──
+// Смысл кнопки изменился: раньше она сносила все配置 и привязки диалогов,
+// теперь — только поля выбранной конфигурации. Проверяем и текст, и запрос.
+{
+  const sent = [];
+  const state = {
+    activeId: "p-1",
+    profiles: serverState.profiles.map((profile) => Object.assign({}, profile)),
+  };
+  currentFetch = (url, options) => {
+    const text = String(url);
+    if (text.includes("/__ap/state")) {
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, state, meta: serverMeta }) });
+    }
+    if (text.includes("/__ap/command")) {
+      const op = JSON.parse(options.body);
+      sent.push(op);
+      if (op.op === "state.restoreDefaults") {
+        // сервер вернёт ту же конфигурацию с другими полями; id тот же
+        state.profiles[0] = Object.assign({}, state.profiles[0], { name: "通用助手", role: "默认角色" });
+      }
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, state, meta: serverMeta }) });
+    }
+    return Promise.reject(new Error(`unexpected fetch ${url}`));
+  };
+
+  activeLocale = "zh";
+  const client = await loadClient();
+  const reg = client.registrations.find((r) => r.key === "settings.section");
+  await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"), 2500);
+  const tree = () => callComponent(reg.component, {}).tree;
+  const byAction = (action) => outline(tree(), (p) => p["data-ap"] === action).matched[0];
+
+  byAction("restore").onClick();
+  const confirming = await renderUntil(reg.component, (acc) => acc.flat.includes("恢复成默认值"));
+  check("подтверждение называет профиль", confirming.flat.includes("把「通用助手」这套配置的字段恢复成默认值？"), confirming.flat.slice(0, 600));
+  check("в подтверждении нет «все конфигурации»", !/全部配置|所有配置|替换/.test(confirming.flat), confirming.flat.slice(0, 600));
+  check("подтверждение говорит, что сам профиль остаётся", confirming.flat.includes("配置本身留着"), confirming.flat.slice(0, 600));
+  const yes = outline(tree(), (p) => p.className === "ap-btn ap-btn-primary" && p.children === "是的，重置").matched[0];
+  check("кнопка действия — «是的，重置»", yes !== undefined, JSON.stringify(outline(tree(), (p) => p.className === "ap-btn").matched.map((p) => p.children)));
+
+  yes?.onClick();
+  // ⚠ ждём именно уведомление: фраза «恢复成默认值» есть и в подтверждении,
+  //   и в уведомлении, поэтому «фразы нет» как критерий не годится.
+  const done = await renderUntil(reg.component, (acc) => acc.flat.includes("已把「通用助手」的字段恢复成默认值。"), 2500);
+  eq("ушёл один запрос", sent.length, 1);
+  eq("сброс идёт по id профиля и с языком", JSON.stringify(sent[0]), JSON.stringify({ op: "state.restoreDefaults", id: "p-1", lang: "zh" }));
+  check("уведомление содержит имя профиля", done.flat.includes("已把「通用助手」的字段恢复成默认值。"), done.flat.slice(0, 800));
+  check("уведомление не говорит «все конфигурации»", !/全部配置|所有配置/.test(done.flat), done.flat.slice(0, 800));
+  check("все три配置 на месте", done.flat.includes("通用助手") && done.flat.includes("编程助手") && done.flat.includes("写作教练"), done.flat.slice(0, 400));
+  eq("выбор остался на сброшенном профиле", outline(tree(), (p) => p.className === "ap-select ap-picker").matched[0]?.value, "p-1");
+  check("после сброса нет «несохранённых изменений»", !done.flat.includes("有未保存改动"), done.flat.slice(0, 400));
 }
 
 // ── 结果 ────────────────────────────────────────────────────

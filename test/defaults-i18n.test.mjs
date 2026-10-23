@@ -126,42 +126,43 @@ function content(profile) {
   eq("defaultProfilesFor(不认识) 就是中文模板", defaultProfilesFor("de-DE"), defaultProfilesFor("zh"));
 }
 
-// ── ⑤ 恢复默认：语言跟着请求走 ──────────────────────────────
+// ── ⑤ 恢复默认：язык из запроса, шаблон — по имени, только эта конфигурация ──
 {
-  const state = normalizeState({});
-  const edited = applyOp(state, {
-    op: "profile.update",
-    id: state.profiles[0].id,
-    patch: { name: "我的配置", role: "自定义角色", rules: "自定义准则" },
+  const state = defaultState("zh");
+  const othersBefore = () => JSON.stringify(state.profiles.filter((p) => p.id !== mine.id));
+
+  // Незнакомое имя ⇒ первый шаблон, содержимое — на языке запроса.
+  const created = applyOp(state, {
+    op: "profile.create",
+    profile: { name: "Моя настройка", role: "своя роль", memories: [{ text: "помнить это" }] },
   });
-  eq("自定义配置先写进去了", edited.ok, true);
+  const mine = state.profiles.find((p) => p.id === created.id);
+  const othersSnapshot = othersBefore();
+  const activeBefore = state.activeId;
 
-  const restoredRu = applyOp(state, { op: "state.restoreDefaults", lang: "ru" });
+  const restoredRu = applyOp(state, { op: "state.restoreDefaults", id: mine.id, lang: "ru" });
   eq("ru 恢复默认成功", restoredRu.ok, true);
-  eq("ru 恢复后有三套", state.profiles.length, 3);
-  eq("ru 恢复后第一套是俄语名", state.profiles[0].name, "Универсальный помощник");
-  check(
-    "ru 恢复后整份内容没有中文",
-    state.profiles.every((profile) => content(profile).every((value) => CJK.test(value) === false)),
-    JSON.stringify(state.profiles.map((profile) => profile.name)),
-  );
-  check(
-    "ru 恢复后不再有刚才的自定义文本",
-    state.profiles.every((profile) => profile.name !== "我的配置" && profile.role !== "自定义角色"),
-  );
+  eq("恢复后配置数量没变（ничего не удалено）", state.profiles.length, 4);
+  eq("незнакомое имя ⇒ первый шаблон, на ru", mine.name, "Универсальный помощник");
+  check("содержимое русское и без CJK", content(mine).every((value) => CJK.test(value) === false), JSON.stringify(content(mine)));
+  eq("память обнулена (сводка)", mine.memorySummary, "");
+  eq("память обнулена (записи)", mine.memories.length, 0);
+  eq("id профиля сохранился", mine.id, created.id);
+  eq("activeId не изменился", state.activeId, activeBefore);
+  eq("остальные配置 не тронуты", othersBefore(), othersSnapshot);
 
-  const restoredEn = applyOp(state, { op: "state.restoreDefaults", lang: "en-GB" });
-  eq("en-GB 恢复默认成功", restoredEn.ok, true);
-  eq("en 恢复后第一套是英文名", state.profiles[0].name, "General assistant");
-  check(
-    "en 恢复后整份内容没有中文",
-    state.profiles.every((profile) => content(profile).every((value) => CJK.test(value) === false)),
-  );
+  // Имя совпадает с именем шаблона **другого** языка ⇒ берём тот же шаблон,
+  // а содержимое отдаём на языке запроса.
+  const eng = applyOp(state, { op: "profile.create", profile: { name: "Программист" } }).id;
+  const engProfile = state.profiles.find((p) => p.id === eng);
+  eq("英语请求：template «Программист»", (applyOp(state, { op: "state.restoreDefaults", id: eng, lang: "en" }).ok, engProfile.name), "Engineer");
+  check("英语请求：содержимое английское", content(engProfile).every((value) => CJK.test(value) === false), JSON.stringify(content(engProfile)));
+  check("英语请求：взяли именно инженерный шаблон", engProfile.role.startsWith("You are a senior software engineer"), engProfile.role.slice(0, 60));
 
-  // 老客户端：不发 lang ⇒ 行为与改造前逐字相同。
-  const restoredLegacy = applyOp(state, { op: "state.restoreDefaults" });
-  eq("不带 lang 的恢复默认仍然成功", restoredLegacy.ok, true);
-  eq("不带 lang 恢复出来的是中文", state.profiles[0].name, "通用助手");
+  // Старый клиент: без lang ⇒ китайский шаблон.
+  const plain = applyOp(state, { op: "profile.create" }).id;
+  applyOp(state, { op: "state.restoreDefaults", id: plain });
+  eq("без lang — китайский шаблон", state.profiles.find((p) => p.id === plain).name, "通用助手");
 }
 
 // ── ⑥ 新建配置的默认名跟着语言走，但不动别的 ────────────────

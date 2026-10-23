@@ -189,13 +189,29 @@ check(
   eq("垃圾被拒绝", applyOp(bare, { op: "state.import", mode: "replace", payload: { hello: 1 } }).ok, false);
 }
 
-// ── ⑦ 恢复默认 ──────────────────────────────────────────────
+// ── ⑦ 恢复默认：сбрасываются поля только выбранной конфигурации ──
 {
   const state = defaultState();
-  applyOp(state, { op: "profile.create", profile: { name: "临时的" } });
-  eq("恢复默认", applyOp(state, { op: "state.restoreDefaults" }).ok, true);
-  eq("恢复后回到 3 套", state.profiles.length, 3);
-  check("临时配置已消失", !state.profiles.some((p) => p.name === "临时的"));
+  const created = applyOp(state, { op: "profile.create", profile: { name: "临时的" } });
+  eq("新建了一套临时配置", created.ok, true);
+  const createdId = created.id;
+  const othersBefore = JSON.stringify(state.profiles.filter((p) => p.id !== createdId));
+  const activeBefore = state.activeId;
+
+  eq("恢复默认", applyOp(state, { op: "state.restoreDefaults", id: createdId }).ok, true);
+  eq("恢复后配置数量没变（ничего не удалено）", state.profiles.length, 4);
+  check("这套配置还在（id тот же）", state.profiles.some((p) => p.id === createdId));
+  eq("内容换成了第一个模板", state.profiles.find((p) => p.id === createdId).name, "通用助手");
+  eq("activeId не изменился", state.activeId, activeBefore);
+  eq(
+    "остальные配置 не тронуты",
+    JSON.stringify(state.profiles.filter((p) => p.id !== createdId)),
+    othersBefore,
+  );
+
+  eq("без id — ошибка", applyOp(state, { op: "state.restoreDefaults" }).ok, false);
+  eq("неизвестный id — ошибка", applyOp(state, { op: "state.restoreDefaults", id: "p-nope" }).ok, false);
+  eq("после ошибки всё на месте", state.profiles.length, 4);
 }
 
 // ── ⑧ 落盘 / 读回 / 损坏文件 ────────────────────────────────
@@ -325,10 +341,12 @@ check(
   eq("全部清除", applyOp(state, { op: "sessions.clearAll" }).ok, true);
   eq("清除后为空", Object.keys(state.sessions).length, 0);
 
-  // 恢复出厂也要清掉会话绑定（配置 id 都换了，留着就是悬空）
-  applyOp(state, { op: "session.set", sessionId: S1, patch: { note: "x" } });
-  applyOp(state, { op: "state.restoreDefaults" });
-  eq("恢复默认清空会话设定", Object.keys(state.sessions).length, 0);
+  // 恢复默认只换**当前配置的内容**，id 不变 ⇒ 会话绑定必须留下来
+  applyOp(state, { op: "session.set", sessionId: S1, patch: { profileId: state.profiles[0].id, note: "x" } });
+  applyOp(state, { op: "state.restoreDefaults", id: state.profiles[0].id });
+  eq("恢复默认 не清空会话设定", Object.keys(state.sessions).length, 1);
+  eq("绑定文本 остался", state.sessions[S1].note, "x");
+  eq("绑定还是指向那套配置", state.sessions[S1].profileId, state.profiles[0].id);
 
   // 导出不含会话（会话 id 是本机的，导出去只会是孤儿）
   applyOp(state, { op: "session.set", sessionId: S1, patch: { note: "导出前的对话" } });

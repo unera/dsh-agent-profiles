@@ -318,6 +318,30 @@ const DIAG_SPANS = (() => {
   check(`代码里用到的 ${used.size} 个键都在三本字典里`, missing.length === 0, missing.slice(0, 12).join(" | "));
 }
 
+// ── ⑥ «обновить» говорит про текущий профиль, а не про «все配置» ──
+// Тексты — часть поведения: если в подтверждении написано «заменит все
+// конфигурации», пользователь вправе ждать именно этого.
+{
+  for (const key of ["confirm.restore", "notice.restored"]) {
+    for (const lang of ["zh", "en", "ru"]) {
+      const value = String(LANGS[lang][key]);
+      check(`${lang}/${key}: называет профиль (NAME)`, value.includes("NAME"), value);
+      check(
+        `${lang}/${key}: не обещает «все конфигурации»`,
+        /все профил|all profile|every profile|全部配置|所有配置/iu.test(value) === false,
+        value,
+      );
+    }
+  }
+  for (const lang of ["zh", "en", "ru"]) {
+    const tip = String(LANGS[lang]["tip.restore"]);
+    check(`${lang}/tip.restore: про текущий профиль`, /текущ|current|当前/iu.test(tip), tip);
+    check(`${lang}/tip.restore: без «все профили»`, /все профил|all profile|every profile|全部配置|所有配置/iu.test(tip) === false, tip);
+    const yes = LANGS[lang]["confirm.restoreYes"];
+    check(`${lang}: есть кнопка подтверждения сброса`, typeof yes === "string" && yes.trim() !== "", String(yes));
+  }
+}
+
 // ── ⑥ 俄语确实被接上了宿主 ───────────────────────────────────
 {
   check(
