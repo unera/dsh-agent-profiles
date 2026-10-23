@@ -19,7 +19,7 @@
  * 用法：node test/client-render.test.mjs
  */
 
-import fs from "node:fs";
+import fs, { readFileSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 
@@ -347,6 +347,11 @@ function walk(node, depth, acc) {
   if (node.props.role !== undefined) extra.push(`role=${node.props.role}`);
   if (node.props["aria-checked"] !== undefined) extra.push(`aria-checked=${node.props["aria-checked"]}`);
   if (node.props.type !== undefined) extra.push(`type=${node.props.type}`);
+  // data-ap / data-icon 打进轮廓里：「按钮顺序」这类断言只能看文档顺序，
+  // 而按钮上的文字是字形，认不出是谁。
+  if (node.props["data-ap"] !== undefined) extra.push(`ap=${node.props["data-ap"]}`);
+  if (node.props["data-icon"] !== undefined) extra.push(`icon=${node.props["data-icon"]}`);
+  if (node.props["data-arrow-direction"] !== undefined) extra.push(`arrow=${node.props["data-arrow-direction"]}`);
   // ⚠ 把 value 也打出来：断言「编辑区里是哪套配置」只能看控件里的值。
   //   用「页面上出现过某段文字」去断言会被左栏的摘要文案骗到 ——
   //   左栏每一条都带角色设定摘要，于是任何角色文本都能在列表里命中。
@@ -663,57 +668,179 @@ const serverMeta = {
   callComponent(reg.component, {}); // 首帧 → effect 里发出 fetch
   callComponent(quick.component, {});
 
-  // ⚠ 判定条件不能用「角色设定」这种词：左栏占位文案里就有
-  //   「（未填角色设定）」，会在编辑器还没渲染出来时就误判为已完成。
-  //   用编辑器最末尾那张卡片上的「注入统计」当锚点，它出现即整页就绪。
-  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("注入统计"));
+  // 判据：选择器（.ap-picker）出现即整页就绪 —— 它是数据到达后才渲染的第一块。
+  // 锚点取「名称」页的内容：选择器在 draft 还没落地时就已渲染，早一步会读到空表单。
+  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"));
   check("数据到达后不抛错", page.threw === undefined, String(page.threw?.stack ?? page.threw));
   check("数据到达后没被兜住", page.boundaryCaught === null, String(page.boundaryCaught));
   console.log("\n【数据到达后（截断 80 行）】\n" + page.lines.slice(0, 80).join("\n"));
 
-  check("左栏列出 3 套配置",
+  const tree = () => callComponent(reg.component, {}).tree;
+  const byClass = (cls) => outline(tree(), (p) => p.className === cls).matched;
+  const byRole = (role) => outline(tree(), (p) => p.role === role).matched;
+  const byAction = (action) => outline(tree(), (p) => p["data-ap"] === action).matched[0];
+
+  check("选择器列出 3 套配置",
     page.flat.includes("通用助手") && page.flat.includes("编程助手") && page.flat.includes("写作教练"),
     page.flat.slice(0, 300));
-  check("右侧渲染了编辑表单", page.flat.includes("<textarea"), page.flat.slice(0, 300));
-  check("有「角色设定」标签", page.flat.includes("角色设定"));
-  check("有「性格特点」与说明", page.flat.includes("性格特点") && page.flat.includes("语气与态度倾向"));
-  check("有「说话习惯」", page.flat.includes("说话习惯"));
-  check("有「行为准则」", page.flat.includes("行为准则"));
-  check("有「长期记忆摘要」", page.flat.includes("长期记忆摘要"));
-  check("有记忆条目区", page.flat.includes("记忆条目"));
-  check("有记忆注入开关", page.flat.includes("将记忆注入到每次会话"));
-  check("注入开关是 role=switch 且带 aria-checked", page.flat.includes("role=switch") && page.flat.includes("aria-checked="), page.flat.slice(0, 400));
-  check("有导入/导出/恢复默认", page.flat.includes("导入") && page.flat.includes("导出") && page.flat.includes("恢复默认"));
-  check("有生成预览", page.flat.includes("生成预览"));
-  check("有注入统计与说明", page.flat.includes("注入统计") && page.flat.includes("本对话段"), page.flat.slice(-800));
-  check("统计里有会话专属设定计数", page.flat.includes("对话专属设定"), page.flat.slice(-800));
-  check("显示了存储位置", page.flat.includes("C:/tmp/profiles.json"));
-  check("当前配置显示为已启用", page.flat.includes("当前已启用"), page.flat.slice(0, 800));
+  const picker = byClass("ap-select ap-picker")[0];
+  check("有一个多行 listbox（select + size）", picker !== undefined, page.flat.slice(0, 400));
+  eq("listbox 的 size 恒为 3（3 套配置也正好 3 行）", picker?.size, 3);
+  eq("listbox 选中当前配置", picker?.value, "p-1");
+  check("当前配置在选择器里带「当前」标记", page.flat.includes("通用助手 · 当前"), page.flat.slice(0, 400));
+  eq("选择器有 aria-label", picker?.["aria-label"], "配置");
 
-  // ── 交互：点左栏另一套配置，编辑区要跟着换 ──
-  // 静态断言只能证明「渲染出了东西」，证明不了「点了有用」。
-  // 配置项上带了 title=名字，用它把元素捞出来直接触发 onClick。
-  const item = outline(callComponent(reg.component, {}).tree, (p) => p.title === "编程助手").matched[0];
-  check("能在左栏找到「编程助手」这一项", item !== undefined);
-  if (item !== undefined) {
-    check("该行带点击处理", typeof item.onClick === "function");
-    item.onClick(); // 切到非当前配置
-    // 判据必须精确到「编辑区里的值」：用「页面上有这段文字」会被左栏摘要骗到，
-    // 于是在状态还没切换完时就误判为已完成，后面所有断言都测了个中间态。
-    const page2 = await renderUntil(
-      reg.component,
-      (acc) => acc.flat.includes('value="你是资深工程师"') && acc.flat.includes("用户用 TS"),
+  const acts = outline(tree(), (p) => typeof p.className === "string" && p.className.split(" ").includes("ap-act")).matched;
+  eq("六个图标按钮", acts.length, 6);
+  eq("按钮顺序: левая колонка (new/duplicate/delete) → правая (import/export/restore)", acts.map((p) => p["data-ap"]).join(","), "new,duplicate,delete,import,export,restore");
+  check("每个按钮都有 aria-label 与 title（同一句）", acts.every((p) => typeof p["aria-label"] === "string" && p["aria-label"] !== "" && p.title === p["aria-label"]), JSON.stringify(acts.map((p) => p["aria-label"])));
+  eq("删除按钮的 aria-label", byAction("delete")?.["aria-label"], "删除当前配置");
+
+  // 一行: слева new/duplicate/import, в середине селект, справа export/restore/delete.
+  const pos = (needle) => page.flat.indexOf(needle);
+  check(
+    "порядок в DOM: new/duplicate/delete → select → import/export/restore",
+    pos("ap=new") < pos("ap=duplicate") && pos("ap=duplicate") < pos("ap=delete")
+      && pos("ap=delete") < pos("<select") && pos("<select") < pos("ap=import")
+      && pos("ap=import") < pos("ap=export") && pos("ap=export") < pos("ap=restore"),
+    [pos("ap=new"), pos("ap=duplicate"), pos("ap=delete"), pos("<select"), pos("ap=import"), pos("ap=export"), pos("ap=restore")].join(","),
+  );
+  {
+    const top = outline(tree(), (p) => p.className === "ap-top").matched[0];
+    const kids = (Array.isArray(top?.children) ? top.children : []).filter((child) => child !== null && child !== undefined);
+    eq(
+      "дети строки: левая колонка → селект → правая колонка → скрытый input",
+      kids.map((child) => child.props?.className ?? child.type).join(","),
+      "ap-actions ap-actions-left,ap-picker-col,ap-actions ap-actions-right,input",
     );
-    check("切到非当前配置后按钮变为「设为当前配置」", page2.flat.includes("设为当前配置"), page2.flat.slice(0, 600));
-    check(
-      "编辑区装的是所选配置（角色设定控件里是「你是资深工程师」）",
-      page2.flat.includes('value="你是资深工程师"'),
-      page2.flat.slice(0, 600),
-    );
-    check("该配置的记忆条目也带出来了", page2.flat.includes("用户用 TS"), page2.flat.slice(0, 1200));
-    check("切换后不再显示未保存徽标", !page2.flat.includes("有未保存改动"), page2.flat.slice(0, 400));
-    check("编辑器仍然没被错误边界兜住", page2.boundaryCaught === null, String(page2.boundaryCaught));
+    eq("левая колонка — три кнопки new/duplicate/delete", outline(kids[0], (p) => p["data-ap"] !== undefined).matched.map((p) => p["data-ap"]).join(","), "new,duplicate,delete");
+    eq("правая колонка — три кнопки import/export/restore", outline(kids[2], (p) => p["data-ap"] !== undefined).matched.map((p) => p["data-ap"]).join(","), "import,export,restore");
   }
+
+  // Иконки: удаление — крестик; импорт/экспорт — документ со стрелкой в/из.
+  eq("иконка удаления — крестик", byAction("delete")?.children, "✕");
+  eq("иконка «新建» прежняя", byAction("new")?.children, "+");
+  eq("иконка «复制» прежняя", byAction("duplicate")?.children, "⧉");
+  eq("иконка «恢复默认» прежняя", byAction("restore")?.children, "↺");
+  const glyphs = outline(tree(), (p) => p["data-icon"] !== undefined).matched;
+  eq("две svg-иконки документов", glyphs.length, 2);
+  eq("импорт — стрелка внутрь, экспорт — наружу", glyphs.map((p) => `${p["data-icon"]}:${p["data-arrow-direction"]}`).join(","), "import:in,export:out");
+  check("стрелки импорта и экспорта — разные path", (() => {
+    const paths = outline(tree(), (p) => typeof p.d === "string" && p.d.includes("12.6 2.7")).matched.map((p) => p.d);
+    return paths.length === 2 && paths[0] !== paths[1];
+  })(), "ожидались два разных path");
+
+  // Тултипы: по наведению и по фокусу, текстом из словаря.
+  {
+    byAction("import").onMouseEnter();
+    const isTip = (p) => typeof p.className === "string" && p.className.split(" ").includes("ap-tip");
+    const hovered = outline(tree(), isTip).matched;
+    eq("по наведению показывается один тултип", hovered.length, 1);
+    eq("текст тултипа — из словаря (tip.import)", hovered[0]?.children, "从 JSON 文件导入配置");
+    eq("тултип связан с кнопкой через aria-describedby", byAction("import")?.["aria-describedby"], "ap-tip-import");
+    byAction("import").onMouseLeave();
+    eq("после ухода курсора тултип исчезает", outline(tree(), isTip).matched.length, 0);
+    byAction("delete").onFocus();
+    const focused = outline(tree(), isTip).matched;
+    eq("по фокусу (клавиатура) тултип тоже показывается", focused.length, 1);
+    eq("тултип удаления — из словаря", focused[0]?.children, "删除当前这套配置");
+    byAction("delete").onBlur();
+    eq("тултип из левой колонки растёт вправо", focused[0]?.className, "ap-tip ap-tip-start");
+    eq("после потери фокуса тултип исчезает", outline(tree(), isTip).matched.length, 0);
+  }
+
+  const tabs = byRole("tab");
+  eq("四个分页", tabs.length, 4);
+  eq("分页顺序：名称/角色/记忆/提示词", tabs.map((p) => p.children).join(","), "名称,角色,记忆,提示词");
+  eq("默认选中的是第一页", tabs.map((p) => p["aria-selected"]).join(","), "true,false,false,false");
+
+  // 默认页「名称」：身份字段在，角色/记忆/预览的字段不在。
+  check("名称页有图标与名称输入框", page.flat.includes("ap-icon-input") && page.flat.includes('value="通用助手"'), page.flat.slice(0, 600));
+  check("名称页没有角色/记忆字段", !page.flat.includes("<textarea"), page.flat.slice(0, 600));
+  check("名称页有「设为当前配置」的状态按钮", page.flat.includes("当前已启用"), page.flat.slice(0, 800));
+  check("页面底部不再有元信息块（说明收进「?」）", page.flat.includes("存储位置") === false && page.flat.includes("注入统计") === false, page.flat.slice(-500));
+
+  // ── 交互：分页 ──
+  const tabNode = (label) => outline(tree(), (p) => p.role === "tab" && p.children === label).matched[0];
+  const roleTab = tabNode("角色");
+  check("能捞到「角色」分页", roleTab !== undefined);
+  if (roleTab !== undefined) {
+    check("分页带点击处理", typeof roleTab.onClick === "function");
+    roleTab.onClick();
+    const rolePage = await renderUntil(reg.component, (acc) => acc.flat.includes("性格特点"));
+    check("角色页渲染了角色/性格/说话/准则", ["角色设定", "性格特点", "说话习惯", "行为准则"].every((text) => rolePage.flat.includes(text)), rolePage.flat.slice(0, 600));
+    check("角色页没有记忆条目与预览", !rolePage.flat.includes("记忆条目") && !rolePage.flat.includes("生成预览"), rolePage.flat.slice(0, 600));
+    eq("「角色」分页被选中", outline(tree(), (p) => p.role === "tab").matched.map((p) => p["aria-selected"]).join(","), "false,true,false,false");
+
+    tabNode("记忆").onClick();
+    const memPage = await renderUntil(reg.component, (acc) => acc.flat.includes("记忆条目"));
+    check("记忆页有注入开关", memPage.flat.includes("将记忆注入到每次会话"), memPage.flat.slice(0, 600));
+    check("注入开关是 role=switch 且带 aria-checked", memPage.flat.includes("role=switch") && memPage.flat.includes("aria-checked="), memPage.flat.slice(0, 600));
+    check("记忆页有摘要与条目与用量", memPage.flat.includes("长期记忆摘要") && memPage.flat.includes("记忆条目") && memPage.flat.includes("长期记忆占用"), memPage.flat.slice(0, 600));
+
+    tabNode("提示词").onClick();
+    const promptPage = await renderUntil(reg.component, (acc) => acc.flat.includes("生成预览"));
+    check("提示词页有预览按钮与说明", promptPage.flat.includes("生成预览") && promptPage.flat.includes("注入内容预览"), promptPage.flat.slice(0, 600));
+    tabNode("名称").onClick();
+    await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"));
+  }
+
+  // ── 交互：「?」浮层 ──
+  const helpBtn = byClass("ap-help-btn")[0];
+  check("页头有「?」按钮", helpBtn !== undefined, page.flat.slice(0, 300));
+  eq("「?」默认收起", helpBtn?.["aria-expanded"], "false");
+  if (helpBtn !== undefined) {
+    helpBtn.onClick();
+    const opened = await renderUntil(reg.component, (acc) => acc.flat.includes("存储位置"));
+    check("展开后有存储位置与注入统计", opened.flat.includes("C:/tmp/profiles.json") && opened.flat.includes("注入统计"), opened.flat.slice(0, 800));
+    check("展开后有对话专属设定计数", opened.flat.includes("对话专属设定"), opened.flat.slice(0, 800));
+    const openedBtn = outline(tree(), (p) => p.className === "ap-help-btn").matched[0];
+    eq("展开后 aria-expanded=true", openedBtn?.["aria-expanded"], "true");
+    openedBtn.onClick();
+    const closed = await renderUntil(reg.component, (acc) => acc.flat.includes("存储位置") === false);
+    check("再点一次收起", closed.flat.includes("存储位置") === false, closed.flat.slice(-400));
+  }
+
+  // ── 交互：删除确认就在按钮条旁边 ──
+  const del = byAction("delete");
+  check("删除按钮可用（3 套配置）", del?.disabled === false);
+  if (del !== undefined) {
+    del.onClick();
+    const confirming = await renderUntil(reg.component, (acc) => acc.flat.includes("删除「通用助手」"));
+    check("确认文案指名要点哪一套", confirming.flat.includes("删除「通用助手」？不可撤销。"), confirming.flat.slice(0, 600));
+    const inline = outline(tree(), (p) => typeof p.className === "string" && p.className.split(" ").includes("ap-confirm-inline")).matched;
+    eq("确认块只有一块，并且挂在顶部那一行里", inline.length, 1);
+    check("确认块 — сразу под строкой (селект не сдвигается)", (() => {
+      const pageNode = outline(tree(), (p) => p.className === "ap-page").matched[0];
+      const kids = Array.isArray(pageNode?.children) ? pageNode.children.filter((child) => child !== null) : [];
+      const classes = kids.map((child) => (child.props && child.props.className) || "");
+      const topAt = classes.indexOf("ap-top");
+      return topAt !== -1 && classes[topAt + 1] === "ap-confirm-inline";
+    })(), JSON.stringify(inline.map((p) => Object.keys(p))));
+    const cancel = outline(tree(), (p) => p.className === "ap-btn" && p.children === "取消" && typeof p.onClick === "function").matched[0];
+    check("确认块里有「取消」", cancel !== undefined);
+    cancel?.onClick();
+    const cancelled = await renderUntil(reg.component, (acc) => acc.flat.includes("ap-confirm-inline") === false);
+    check("取消后确认块消失", cancelled.flat.includes("ap-confirm-inline") === false);
+    check("取消没有删掉配置", cancelled.flat.includes("通用助手") && cancelled.flat.includes("写作教练"));
+  }
+
+  // ── 交互：在选择器里换一套配置 ──
+  // 静态断言只能证明「渲染出了东西」，证明不了「换了有用」。
+  picker.onChange({ target: { value: "p-2" } });
+  const page2 = await renderUntil(reg.component, (acc) => acc.flat.includes("设为当前配置"));
+  check("换配置后按钮变为「设为当前配置」", page2.flat.includes("设为当前配置"), page2.flat.slice(0, 600));
+  eq("选择器跟着换到新配置", outline(tree(), (p) => p.className === "ap-select ap-picker").matched[0]?.value, "p-2");
+  tabNode("角色").onClick();
+  const page2role = await renderUntil(reg.component, (acc) => acc.flat.includes('value="你是资深工程师"'));
+  check("角色页装的是所选配置", page2role.flat.includes('value="你是资深工程师"'), page2role.flat.slice(0, 600));
+  tabNode("记忆").onClick();
+  const page2mem = await renderUntil(reg.component, (acc) => acc.flat.includes("用户用 TS"));
+  check("记忆页带出了该配置的条目", page2mem.flat.includes("用户用 TS"), page2mem.flat.slice(0, 900));
+  check("切换后不再显示未保存徽标", !page2mem.flat.includes("有未保存改动"), page2mem.flat.slice(0, 400));
+  check("编辑器仍然没被错误边界兜住", page2mem.boundaryCaught === null, String(page2mem.boundaryCaught));
+  tabNode("名称").onClick();
+  await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"));
 
   const sw = await renderUntil(quick.component, (acc) => acc.flat.includes("通用助手"));
   check("切换器数据到达后不抛错", sw.threw === undefined, String(sw.threw?.stack ?? sw.threw));
@@ -1057,12 +1184,27 @@ const serverMeta = {
 
   const client = await loadClient();
   const reg = client.registrations.find((r) => r.key === "settings.section");
-  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("Injection:"), 2500);
+  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"), 2500);
   console.log("\n【英文界面（截断 60 行）】\n" + page.lines.slice(0, 60).join("\n"));
 
   check("英文界面没被错误边界兜住", page.boundaryCaught === null, String(page.boundaryCaught));
   check("英文页整页**一个中文都没有**", !/[\u4e00-\u9fff]/u.test(page.flat), page.flat.slice(0, 500));
-  check("英文页有英文的注入统计行", page.flat.includes("Injection:"), page.flat.slice(0, 500));
+  eq("英文分页标题", outline(callComponent(reg.component, {}).tree, (p) => p.role === "tab").matched.map((p) => p.children).join(","), "Name,Role,Memory,Prompt");
+  eq(
+    "英文图标按钮的 aria-label",
+    outline(callComponent(reg.component, {}).tree, (p) => p["data-ap"] !== undefined).matched.map((p) => p["aria-label"]).join("|"),
+    "New profile|Duplicate current profile|Delete current profile|Import profiles|Export profiles|Restore default profiles",
+  );
+  // 「?」里的注入统计（以前在页面底部，现在收进浮层）。
+  outline(callComponent(reg.component, {}).tree, (p) => p.className === "ap-help-btn").matched[0].onClick();
+  const withHelp = await renderUntil(reg.component, (acc) => acc.flat.includes("Injection:"));
+  check("英文页有英文的注入统计行", withHelp.flat.includes("Injection:"), withHelp.flat.slice(0, 500));
+  outline(callComponent(reg.component, {}).tree, (p) => p.className === "ap-help-btn").matched[0].onClick();
+  await renderUntil(reg.component, (acc) => acc.flat.includes("Injection:") === false);
+
+  // 模板按钮在「Role」页上。
+  outline(callComponent(reg.component, {}).tree, (p) => p.role === "tab" && p.children === "Role").matched[0].onClick();
+  await renderUntil(reg.component, (acc) => acc.flat.includes("Personality"));
 
   // 6 个角色模板按钮：改造前是硬编码中文（label / role 都写死在 ROLE_TEMPLATES 里）。
   const CHIPS = ["Engineering", "Writing coach", "Translation", "Product manager", "Data analysis", "Study partner"];
@@ -1150,14 +1292,22 @@ const serverMeta = {
   eq("三本字典都注册了", Object.keys(localeDicts["dsh-agent-profiles"] ?? {}).sort().join(","), "en,ru,zh");
 
   const reg = client.registrations.find((r) => r.key === "settings.section");
-  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("Инъекции:"), 2500);
+  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"), 2500);
   console.log("\n【俄语界面（截断 40 行）】\n" + page.lines.slice(0, 40).join("\n"));
 
   check("俄语界面没被错误边界兜住", page.boundaryCaught === null, String(page.boundaryCaught));
   check("俄语页整页一个 CJK 都没有", !/[\u3000-\u303f\u4e00-\u9fff\uff01-\uff60]/u.test(page.flat), page.flat.slice(0, 400));
-  for (const needle of ["Профили", "Импорт", "Экспорт", "Восстановить по умолчанию", "Роль"]) {
+  eq("俄语分页标题", outline(callComponent(reg.component, {}).tree, (p) => p.role === "tab").matched.map((p) => p.children).join(","), "Имя,Роль,Память,Промпт");
+  eq(
+    "俄语图标按钮的 aria-label",
+    outline(callComponent(reg.component, {}).tree, (p) => p["data-ap"] !== undefined).matched.map((p) => p["aria-label"]).join("|"),
+    "Новый профиль|Дублировать профиль|Удалить профиль|Импортировать профили|Экспортировать профили|Восстановить профили по умолчанию",
+  );
+  for (const needle of ["Профили", "Имя"]) {
     check(`俄语页有「${needle}」`, page.flat.includes(needle), page.flat.slice(0, 600));
   }
+  outline(callComponent(reg.component, {}).tree, (p) => p.role === "tab" && p.children === "Роль").matched[0].onClick();
+  await renderUntil(reg.component, (acc) => acc.flat.includes("Характер"));
   const ruChips = outline(callComponent(reg.component, {}).tree, (p) => p.className === "ap-chip").matched
     .map((p) => p.children);
   check("6 个模板按钮都是俄语", JSON.stringify(ruChips) === JSON.stringify([
@@ -1179,15 +1329,21 @@ const serverMeta = {
   };
   const client = await loadClient();
   const reg = client.registrations.find((r) => r.key === "settings.section");
-  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("注入统计"), 2500);
+  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"), 2500);
   check("未知语言不抛错", page.threw === undefined, String(page.threw?.stack ?? page.threw));
-  check("未知语言回落中文界面", page.flat.includes("配置列表") && page.flat.includes("恢复默认"), page.flat.slice(0, 400));
+  check("未知语言回落中文界面", page.flat.includes("配置列表") && page.flat.includes("名称"), page.flat.slice(0, 400));
+  eq("未知语言的分页标题是中文", outline(callComponent(reg.component, {}).tree, (p) => p.role === "tab").matched.map((p) => p.children).join(","), "名称,角色,记忆,提示词");
+  eq(
+    "未知语言的图标按钮 aria-label 是中文",
+    outline(callComponent(reg.component, {}).tree, (p) => p["data-ap"] !== undefined).matched.map((p) => p["aria-label"]).join("|"),
+    "新建配置|复制当前配置|删除当前配置|导入配置|导出配置|恢复默认配置",
+  );
   check(
     "未知语言页面上没有裸键名（说明走的不是 bind 的 key 兜底）",
-    ["list.title", "editor.save", "field.role"].every((key) => page.flat.includes(key) === false),
+    ["list.title", "editor.save", "field.role", "tab.name"].every((key) => page.flat.includes(key) === false),
     page.flat.slice(0, 400),
   );
-  check("未知语言页面没有空的标签", page.flat.includes('"名称"') && page.flat.includes('"角色设定"'));
+  check("未知语言页面没有空的标签", page.flat.includes('"名称"') && page.flat.includes('"配置列表"'));
   activeLocale = "zh";
 }
 
@@ -1206,7 +1362,10 @@ const serverMeta = {
   };
   const client = await loadClient();
   const reg = client.registrations.find((r) => r.key === "settings.section");
-  await renderUntil(reg.component, (acc) => acc.flat.includes("注入统计"), 2500);
+  await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"), 2500);
+  // 文本框在「角色」页上：先切过去，再验「切语言不丢内容」。
+  outline(callComponent(reg.component, {}).tree, (p) => p.role === "tab" && p.children === "角色").matched[0].onClick();
+  await renderUntil(reg.component, (acc) => acc.flat.includes("性格特点"));
 
   const roleField = outline(callComponent(reg.component, {}).tree, (p) => p.className === "ap-textarea").matched[0];
   check("找到「角色设定」的文本框", roleField !== undefined);
@@ -1230,10 +1389,9 @@ const serverMeta = {
   }
 }
 
-// ── 场景 16：i18n 这一步不改版面 ────────────────────────────
-// 两个提交要能分开评审：第一个提交只该换文字，不该动结构。
-// 这里把「字段的集合与顺序」钉住，第二个提交会显式改掉这组断言 ——
-// 改的时候必须是有意的，而不是顺手。
+// ── 场景 16：版面本身（列表一栏、六个字形按钮、四个分页、无页脚说明）──
+// 这一组是**结构断言**，不看文案：评审要能一眼看出「布局改成什么样了」，
+// 而不是从截图里猜。要求写在这里，改布局的人必须连断言一起改。
 {
   activeLocale = "zh";
   currentFetch = (url) => {
@@ -1246,19 +1404,301 @@ const serverMeta = {
   };
   const client = await loadClient();
   const reg = client.registrations.find((r) => r.key === "settings.section");
-  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("注入统计"), 2500);
+  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"), 2500);
+  const tree = () => callComponent(reg.component, {}).tree;
 
-  const labels = outline(callComponent(reg.component, {}).tree, (p) => p.className === "ap-label").matched
+  // ① 恰好一个配置选择器，固定三行高（不是一列卡片，也不随配置数量长高）。
+  const selects = outline(tree(), (p) => typeof p.className === "string" && p.className.split(" ").includes("ap-picker")).matched;
+  eq("设置页只有一个配置 listbox", selects.length, 1);
+  eq("listbox 固定三行（size === 3）", selects[0]?.size, 3);
+  check("listbox 里没有第二套列表控件", page.flat.includes(".ap-list") === false && page.flat.includes(".ap-item") === false, page.flat.slice(0, 300));
+
+  // ② 六个图标按钮，每个都有 title + aria-label；иконки — 4 глифа + 2 svg.
+  const acts = outline(tree(), (p) => typeof p.className === "string" && p.className.split(" ").includes("ap-act")).matched;
+  eq("六个图标按钮", acts.length, 6);
+  check(
+    "每个按钮都有 title 与 aria-label（且两者相同）",
+    acts.every((p) => typeof p.title === "string" && p.title !== "" && p["aria-label"] === p.title),
+    JSON.stringify(acts.map((p) => [p.title, p["aria-label"]])),
+  );
+  check(
+    "на кнопках только иконки: 4 глифа + 2 svg-документа",
+    acts.filter((p) => typeof p.children === "string").length === 4
+      && acts.filter((p) => typeof p.children === "object" && p.children !== null).length === 2,
+    JSON.stringify(acts.map((p) => (typeof p.children === "string" ? p.children : "svg"))),
+  );
+
+  // ③ 四个分页，顺序固定，默认第一个。
+  const tabs = outline(tree(), (p) => p.role === "tab").matched;
+  eq("四个分页", tabs.length, 4);
+  eq("分页顺序：名称 → 角色 → 记忆 → 提示词", tabs.map((p) => p.children).join(">"), "名称>角色>记忆>提示词");
+  eq("默认选中第一个分页", tabs[0]?.["aria-selected"], "true");
+  eq("其他分页都没被选中", tabs.slice(1).map((p) => p["aria-selected"]).join(","), "false,false,false");
+
+  // ④ 页面底部没有说明块：元信息只在「?」展开后出现。
+  eq("默认状态下页面上没有元信息块", outline(tree(), (p) => typeof p.className === "string" && p.className.includes("ap-meta")).matched.length, 0);
+  check("说明按钮在页头", outline(tree(), (p) => p.className === "ap-help-btn").matched.length === 1);
+  check("页面上没有页脚说明文字", page.flat.includes("存储位置") === false && page.flat.includes("注入统计") === false, page.flat.slice(-400));
+
+  // ⑤ 编辑区分页各自带哪些字段（集合，不是顺序）。
+  const openTab = (label) => outline(tree(), (p) => p.role === "tab" && p.children === label).matched[0].onClick();
+  const labelsNow = () => outline(tree(), (p) => p.className === "ap-label").matched
     .map((p) => p.children)
     .filter((child) => typeof child === "string");
-  eq(
-    "表单字段的集合与顺序没变（角色 → 性格 → 说话 → 准则 → 注入开关 → 记忆摘要 → 记忆条目）",
-    labels.join("|"),
-    "角色设定|性格特点|说话习惯|行为准则|将记忆注入到每次会话|长期记忆摘要|记忆条目",
-  );
-  check("仍然是左右分栏（列表 + 编辑区）", page.flat.includes(".ap-split") && page.flat.includes(".ap-list") && page.flat.includes(".ap-editor"), page.flat.slice(0, 300));
-  check("左栏仍然列着三套配置", page.flat.includes(".ap-item") && page.flat.includes("编程助手"));
-  check("底部信息区仍在页面上（存储位置 + 注入统计）", page.flat.includes("存储位置") && page.flat.includes("注入统计"));
+  eq("名称页没有角色/记忆的字段标签", labelsNow().join("|"), "配置列表");
+  check("名称页里有图标与名称输入框", page.flat.includes("ap-icon-input") && page.flat.includes('value="通用助手"'));
+  openTab("角色");
+  await renderUntil(reg.component, (acc) => acc.flat.includes("性格特点"));
+  eq("角色页的字段", labelsNow().join("|"), "配置列表|角色设定|性格特点|说话习惯|行为准则");
+  openTab("记忆");
+  await renderUntil(reg.component, (acc) => acc.flat.includes("记忆条目"));
+  eq("记忆页的字段", labelsNow().join("|"), "配置列表|将记忆注入到每次会话|长期记忆摘要|记忆条目");
+  openTab("提示词");
+  await renderUntil(reg.component, (acc) => acc.flat.includes("注入内容预览"));
+  eq("提示词页只有预览", labelsNow().join("|"), "配置列表");
+  check("提示词页有预览按钮", page.flat.length > 0);
+}
+
+// ── 场景 17：删除的完整来回（确认 → 取消 / 确认 → 真的发命令）────
+// 版面只决定「确认块画在哪」，行为仍是：取消什么都不发，确认才发一次
+// `profile.delete`。这两条分开验，否则「画出来了」会被当成「删掉了」。
+{
+  const sent = [];
+  const twoProfiles = {
+    activeId: "p-1",
+    profiles: serverState.profiles.slice(0, 2),
+  };
+  currentFetch = (url, options) => {
+    const text = String(url);
+    if (text.includes("/__ap/state")) {
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, state: twoProfiles, meta: serverMeta }) });
+    }
+    if (text.includes("/__ap/command")) {
+      const op = JSON.parse(options.body);
+      sent.push(op);
+      if (op.op === "profile.delete") {
+        return Promise.resolve({
+          json: () => Promise.resolve({
+            ok: true,
+            state: { activeId: "p-2", profiles: [twoProfiles.profiles[1]] },
+            meta: serverMeta,
+          }),
+        });
+      }
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, state: twoProfiles, meta: serverMeta }) });
+    }
+    return Promise.reject(new Error(`unexpected fetch ${url}`));
+  };
+
+  const client = await loadClient();
+  const reg = client.registrations.find((r) => r.key === "settings.section");
+  await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"), 2500);
+  const tree = () => callComponent(reg.component, {}).tree;
+  const byAction = (action) => outline(tree(), (p) => p["data-ap"] === action).matched[0];
+
+  // ① 取消：确认块消失，什么都没发。
+  byAction("delete").onClick();
+  await renderUntil(reg.component, (acc) => acc.flat.includes("ap-confirm-inline"));
+  outline(tree(), (p) => p.className === "ap-btn" && p.children === "取消").matched[0].onClick();
+  await renderUntil(reg.component, (acc) => acc.flat.includes("ap-confirm-inline") === false);
+  eq("取消删除没有发出任何命令", sent.length, 0);
+
+  // ② 确认：发一次 profile.delete，删的就是当前选中的那套。
+  byAction("delete").onClick();
+  await renderUntil(reg.component, (acc) => acc.flat.includes("ap-confirm-inline"));
+  const confirmNode = outline(tree(), (p) => p.className === "ap-btn ap-btn-primary" && p.children === "删除").matched[0];
+  check("确认块里的动作按钮是「删除」", confirmNode !== undefined, JSON.stringify(outline(tree(), (p) => p.className === "ap-btn").matched.map((p) => p.children)));
+  confirmNode?.onClick();
+  // 判据要等**状态回填**：确认块在点下去的那一刻就消失，删除结果还要等一轮 fetch。
+  const after = await renderUntil(reg.component, (acc) => acc.flat.includes("通用助手") === false, 2500);
+  eq("只发了一条命令", sent.length, 1);
+  eq("命令就是删除那套配置", JSON.stringify(sent[0]), JSON.stringify({ op: "profile.delete", id: "p-1" }));
+  check("删完确认块没了", after.flat.includes("ap-confirm-inline") === false);
+  check("删掉的配置不再出现在选择器里", after.flat.includes("通用助手") === false, after.flat.slice(0, 400));
+  check("删除后没有被错误边界兜住", after.boundaryCaught === null, String(after.boundaryCaught));
+}
+
+// ── 场景 18：фиксированные три строки и подсказки на трёх языках ──
+// Требование пользователя: селект **не растёт** при большом числе профилей,
+// у каждой кнопки есть подсказка текстом из словаря, а порядок кнопок в строке
+// один и тот же независимо от языка.
+{
+  const manyProfiles = Array.from({ length: 8 }, (_, index) => ({
+    id: `p-${index + 1}`,
+    name: index === 0 ? "Первый" : `Профиль ${index + 1}`,
+    icon: "🤖",
+    role: "",
+    personality: "",
+    speech: "",
+    rules: "",
+    memorySummary: "",
+    injectMemory: true,
+    memories: [],
+    createdAt: 1,
+    updatedAt: 1,
+  }));
+
+  const TIPS = {
+    zh: {
+      new: "新建一套配置",
+      duplicate: "复制当前这套配置",
+      import: "从 JSON 文件导入配置",
+      export: "把全部配置导出为 JSON 文件",
+      restore: "用内置默认配置替换全部配置",
+      delete: "删除当前这套配置",
+    },
+    en: {
+      new: "Create a new profile",
+      duplicate: "Copy the current profile",
+      import: "Import profiles from a JSON file",
+      export: "Export every profile to a JSON file",
+      restore: "Replace every profile with the built-in defaults",
+      delete: "Delete the current profile",
+    },
+    ru: {
+      new: "Создать новый профиль",
+      duplicate: "Скопировать текущий профиль",
+      import: "Импортировать профили из файла JSON",
+      export: "Экспортировать все профили в файл JSON",
+      restore: "Заменить все профили заводскими настройками",
+      delete: "Удалить текущий профиль",
+    },
+  };
+  const ORDER = ["new", "duplicate", "delete", "import", "export", "restore"];
+
+  for (const lang of ["zh", "en", "ru"]) {
+    activeLocale = lang;
+    const state = { activeId: "p-1", profiles: manyProfiles };
+    currentFetch = (url) => {
+      if (String(url).includes("/__ap/state")) {
+        return Promise.resolve({ json: () => Promise.resolve({ ok: true, state, meta: serverMeta }) });
+      }
+      return Promise.reject(new Error(`unexpected fetch ${url}`));
+    };
+    const client = await loadClient();
+    const reg = client.registrations.find((r) => r.key === "settings.section");
+    await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"), 2500);
+    const tree = () => callComponent(reg.component, {}).tree;
+
+    // ⚠ ищем именно <select>: у обёртки .ap-picker-col тоже есть "ap-picker" в классе.
+    const picker = outline(tree(), (p) => typeof p.className === "string" && p.className.split(" ").includes("ap-picker")).matched[0];
+    eq(`${lang}: 8 профилей — size всё равно 3 (не растёт)`, picker?.size, 3);
+    eq(`${lang}: в селекте все 8 профилей`, picker?.children?.length, 8);
+
+    eq(
+      `${lang}: порядок кнопок в строке`,
+      outline(tree(), (p) => p["data-ap"] !== undefined).matched.map((p) => p["data-ap"]).join(","),
+      ORDER.join(","),
+    );
+
+    const isTip = (p) => typeof p.className === "string" && p.className.split(" ").includes("ap-tip");
+    for (const action of ORDER) {
+      const btn = () => outline(tree(), (p) => p["data-ap"] === action).matched[0];
+      btn().onMouseEnter();
+      const tips = outline(tree(), isTip).matched;
+      eq(`${lang}: подсказка «${action}» — одна и из словаря`, tips.length === 1 ? tips[0].children : `tips=${tips.length}`, TIPS[lang][action]);
+      eq(`${lang}: aria-describedby у «${action}»`, btn()["aria-describedby"], `ap-tip-${action}`);
+      btn().onMouseLeave();
+      eq(`${lang}: после ухода курсора подсказок нет (${action})`, outline(tree(), isTip).matched.length, 0);
+    }
+
+    if (lang !== "zh") {
+      const allTips = ORDER.map((action) => TIPS[lang][action]).join(" ");
+      check(`${lang}: подсказки без CJK`, !/[\u3000-\u303f\u4e00-\u9fff\uff01-\uff60]/u.test(allTips), allTips);
+    }
+  }
+
+  // 1 профиль — высота всё равно как под три строки (форма не прыгает).
+  activeLocale = "zh";
+  const single = { activeId: "p-1", profiles: [manyProfiles[0]] };
+  currentFetch = (url) => {
+    if (String(url).includes("/__ap/state")) {
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, state: single, meta: serverMeta }) });
+    }
+    return Promise.reject(new Error(`unexpected fetch ${url}`));
+  };
+  const client = await loadClient();
+  const reg = client.registrations.find((r) => r.key === "settings.section");
+  await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"), 2500);
+  const picker = outline(callComponent(reg.component, {}).tree, (p) => typeof p.className === "string" && p.className.split(" ").includes("ap-picker")).matched[0];
+  eq("один профиль — size тоже 3", picker?.size, 3);
+  const del = outline(callComponent(reg.component, {}).tree, (p) => p["data-ap"] === "delete").matched[0];
+  eq("последний профиль удалить нельзя", del?.disabled, true);
+}
+
+// ── 场景 19：колонки ровно в высоту селекта (по стилям, не по пикселям) ──
+// Пиксели мерить нечем и незачем: важно, что высота строки задана **одной
+// переменной** и что обе колонки (селект и кнопки) берут её же, а три кнопки
+// делят её поровну. Это и есть «низ колонки совпадает с низом селекта».
+{
+  // исходник читаем относительно этого файла: тест не должен зависеть от cwd
+  const css = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  const rule = (selector) => {
+    const at = css.indexOf(selector + " {");
+    if (at === -1) return "";
+    const open = css.indexOf("{", at);
+    const close = css.indexOf("}", open);
+    return css.slice(open + 1, close);
+  };
+
+  const top = rule(".ap-top");
+  check("строка объявляет высоту строки одной переменной --ap-row-h", /--ap-row-h:\s*[\d.]+em/u.test(top), top);
+  check("строка объявляет фиксированную ширину колонки --ap-col-w", /--ap-col-w:\s*[\d.]+px/u.test(top), top);
+
+  const picker = rule(".ap-picker");
+  check("селект берёт высоту из --ap-row-h", picker.includes("height: var(--ap-row-h)"), picker);
+  check("селект скроллит внутри, а не растёт", picker.includes("overflow-y: auto"), picker);
+
+  const actions = rule(".ap-actions");
+  check("колонка кнопок берёт ту же высоту --ap-row-h", actions.includes("height: var(--ap-row-h)"), actions);
+  check("колонка кнопок фиксированной ширины --ap-col-w", actions.includes("width: var(--ap-col-w)"), actions);
+  check("колонка — вертикальный flex", actions.includes("flex-direction: column"), actions);
+
+  const wrap = rule(".ap-act-wrap");
+  check("три кнопки делят высоту поровну (flex: 1 1 0)", wrap.includes("flex: 1 1 0"), wrap);
+  const act = rule(".ap-act");
+  check("кнопка растягивается на свою треть (height: 100%)", act.includes("height: 100%"), act);
+  check("кнопка на всю ширину колонки", act.includes("width: 100%"), act);
+
+  check("левая колонка растёт вправо (start)", rule(".ap-tip-start").includes("left: 0") && rule(".ap-tip-start").includes("right: auto"), rule(".ap-tip-start"));
+  check("правая колонка растёт влево (end)", rule(".ap-tip-end").includes("right: 0") && rule(".ap-tip-end").includes("left: auto"), rule(".ap-tip-end"));
+  check("подтверждение удаления стоит ниже строки, а не внутри неё", rule(".ap-confirm-inline").includes("margin-top"), rule(".ap-confirm-inline"));
+}
+
+// ── 场景 20：сторона тултипов и равенство колонок в DOM ──
+{
+  activeLocale = "zh";
+  currentFetch = (url) => {
+    if (String(url).includes("/__ap/state")) {
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, state: serverState, meta: serverMeta }) });
+    }
+    return Promise.reject(new Error(`unexpected fetch ${url}`));
+  };
+  const client = await loadClient();
+  const reg = client.registrations.find((r) => r.key === "settings.section");
+  await renderUntil(reg.component, (acc) => acc.flat.includes("ap-icon-input"), 2500);
+  const tree = () => callComponent(reg.component, {}).tree;
+  const byAction = (action) => outline(tree(), (p) => p["data-ap"] === action).matched[0];
+  const isTip = (p) => typeof p.className === "string" && p.className.split(" ").includes("ap-tip");
+
+  byAction("new").onMouseEnter();
+  eq("левая колонка: подсказка у левого края", outline(tree(), isTip).matched[0]?.className, "ap-tip ap-tip-start");
+  byAction("new").onMouseLeave();
+
+  byAction("export").onMouseEnter();
+  eq("правая колонка: подсказка у правого края", outline(tree(), isTip).matched[0]?.className, "ap-tip ap-tip-end");
+  byAction("export").onMouseLeave();
+
+  // Дерево здесь начинается с компонента-обёртки (класс), поэтому обход
+  // по узлам до колонок не доходит — считаем по плоскому отпечатку страницы.
+  const flat = outline(tree(), () => false).flat;
+  const leftAt = flat.indexOf(".ap-actions.ap-actions-left");
+  const selectAt = flat.indexOf("<select");
+  const rightAt = flat.indexOf(".ap-actions.ap-actions-right");
+  check("две колонки: слева и справа от селекта", leftAt !== -1 && rightAt !== -1 && leftAt < selectAt && selectAt < rightAt, [leftAt, selectAt, rightAt].join(","));
+  const wraps = (from, to) => flat.slice(from, to).match(/ap-act-wrap/g)?.length ?? 0;
+  eq("в левой колонке три кнопки", wraps(leftAt, selectAt), 3);
+  eq("в правой колонке три кнопки", wraps(rightAt), 3);
 }
 
 // ── 结果 ────────────────────────────────────────────────────
