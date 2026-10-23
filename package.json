@@ -30,11 +30,13 @@
   "meta": {
     "title": {
       "zh": "智能体配置",
-      "en": "Agent Profiles"
+      "en": "Agent Profiles",
+      "ru": "Профили агента"
     },
     "description": {
       "zh": "建多套智能体配置（角色/性格/说话习惯/行为准则/长期记忆）并指定当前启用的一套；支持记忆注入开关、导入导出与恢复默认。",
-      "en": "Create multiple agent profiles (role, personality, speaking style, ground rules, long-term memory) and choose which one is active; includes a memory-injection toggle, import/export and restore-defaults."
+      "en": "Create multiple agent profiles (role, personality, speaking style, ground rules, long-term memory) and choose which one is active; includes a memory-injection toggle, import/export and restore-defaults.",
+      "ru": "Несколько профилей агента (роль, характер, манера речи, правила поведения, долговременная память) с выбором активного; переключатель инъекции памяти, импорт и экспорт, восстановление по умолчанию."
     }
   },
   "dsh": {

@@ -116,6 +116,24 @@ let diagCalls = [];
  */
 const localeDicts = {};
 let activeLocale = "zh";
+/** 宿主语言目录（真的 locale 服务里有 zh / en；ru 由插件 addLanguage 加进来）。 */
+const languageCatalog = [
+  { id: "zh", label: "中文", fallback: "en" },
+  { id: "en", label: "English", fallback: undefined },
+];
+let addedLanguages = [];
+/** 当前语言在真服务里的回退链：active → … → en；目录里没有它时只有它自己。 */
+function localeChain(active) {
+  const chain = [];
+  let current = languageCatalog.find((entry) => entry.id === active);
+  while (current !== undefined && chain.includes(current.id) === false) {
+    chain.push(current.id);
+    const fallback = current.fallback;
+    current = fallback === undefined ? undefined : languageCatalog.find((entry) => entry.id === fallback);
+  }
+  if (chain.length === 0) chain.push(active);
+  return chain;
+}
 globalThis.fetch = (...args) => {
   const url = String(args[0] ?? "");
   if (url.includes("/__ap/diag")) {
@@ -414,6 +432,7 @@ async function loadClient(options = {}) {
   const withOfficial = options.withOfficial !== false;
   officialShouldThrow = options.officialThrows === true;
   diagCalls = [];
+  addedLanguages = [];
   delete globalThis.__DSH_AGENT_PROFILES_REGISTERED__;
   styleEls.length = 0;
   let captured = null;
@@ -467,19 +486,39 @@ async function loadClient(options = {}) {
       info: (m) => logs.push(["info", String(m)]),
     },
     locale: {
-      // ⚠ 本插件的注册姿势是**三参**：`register(NS, "zh", DICT_ZH)`（见 lib/client.js 的 apply）。
-      //   写成 `(ns, dicts)` 会把语言名当成字典收下来，于是永远取不到词条、
-      //   整页回落中文兜底 —— 那正是「英文渲染没人验过」能长期藏着的原因。
-      register: (ns, lang, dicts) => {
+      // ⚠ 本插件的注册姿势是**映射表**：`register(NS, { zh, en, ru })`
+      //   （与官方 client 插件一致）。两种形态都收：三参写法在别处还在用。
+      //   收错形态的后果很隐蔽：语言名被当成字典 → 永远取不到词条 →
+      //   整页回落中文兜底，而中文页刚好是默认，没人看得出来。
+      register: (ns, localeOrDicts, dict) => {
         if (localeDicts[ns] === undefined) localeDicts[ns] = {};
-        localeDicts[ns][lang] = dicts;
+        const pairs = typeof localeOrDicts === "string"
+          ? [[localeOrDicts, dict]]
+          : Object.entries(localeOrDicts ?? {});
+        for (const [locale, entries] of pairs) localeDicts[ns][locale] = entries;
         return () => {};
       },
+      // 真服务：沿当前语言的回退链查词条，查不到再返回 key 本身。
       bind: (ns) => (key) => {
         const d = localeDicts[ns];
-        if (d === undefined) return key; // 没注册过就原样返回 key（与真 locale 服务同行为）
-        const table = activeLocale === "en" ? d.en : d.zh;
-        return table?.[key] ?? key;
+        if (d === undefined) return key;
+        for (const lang of localeChain(activeLocale)) {
+          const value = d[lang]?.[key];
+          if (value !== undefined) return value;
+        }
+        return key;
+      },
+      getLocale: () => ({ active: activeLocale, locales: languageCatalog.slice(), revision: 0 }),
+      // 真服务：登记一种可选语言；重复登记会抛（插件里应该吞掉）。
+      addLanguage: (input) => {
+        addedLanguages.push(input);
+        if (languageCatalog.some((entry) => entry.id === input.id) === false) {
+          languageCatalog.push({ id: input.id, label: input.label, fallback: input.fallback });
+        }
+        return () => {
+          const at = languageCatalog.findIndex((entry) => entry.id === input.id);
+          if (at !== -1) languageCatalog.splice(at, 1);
+        };
       },
     },
     slots: {
@@ -519,6 +558,7 @@ async function loadClient(options = {}) {
     effects,
     subscribers,
     diagCalls: () => diagCalls.slice(),
+    addedLanguages: () => addedLanguages.slice(),
   };
 }
 
@@ -1075,6 +1115,150 @@ const serverMeta = {
     JSON.stringify(compactAny.map((p) => p.title)),
   );
   activeLocale = "zh";
+}
+
+// ── 场景 13：俄语界面 + 语言注册接上了宿主 ───────────────────
+// 口径和英文那条一样：数据用俄语/英语，这样「整页没有 CJK」才是硬断言 ——
+// 任何中文都只可能来自界面文案。
+{
+  const ruState = {
+    activeId: "p-1",
+    profiles: [
+      { id: "p-1", name: "Общий", icon: "🤖", role: "", personality: "", speech: "", rules: "",
+        memorySummary: "", injectMemory: true, memories: [], createdAt: 1, updatedAt: 1 },
+      { id: "p-2", name: "Инженер", icon: "🧑‍💻", role: "Ты инженер", personality: "Строго",
+        speech: "Сначала вывод", rules: "Не выдумывать", memorySummary: "", injectMemory: true,
+        memories: [{ id: "m1", text: "Пользователь пишет на TS", createdAt: 1 }], createdAt: 1, updatedAt: 1 },
+    ],
+  };
+  const ruMeta = {
+    dataDir: "/tmp", file: "/tmp/profiles.json", profileCount: 2, activeId: "p-1",
+    activeName: "Общий", memoryCount: 1, lastError: null, loadedFromDisk: true, promptChars: 12,
+    diagnostics: { renders: 1, emptyRenders: 0, lastRenderAt: 1700000000000, lastChars: 0 },
+  };
+  activeLocale = "ru";
+  currentFetch = (url) => {
+    if (String(url).includes("/__ap/state")) {
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, state: ruState, meta: ruMeta }) });
+    }
+    return Promise.reject(new Error(`unexpected fetch ${url}`));
+  };
+
+  const client = await loadClient();
+  eq("宿主目录里出现了 ru", client.addedLanguages().some((entry) => entry.id === "ru"), true);
+  eq("ru 的回退语言是 en", client.addedLanguages().find((entry) => entry.id === "ru")?.fallback, "en");
+  eq("三本字典都注册了", Object.keys(localeDicts["dsh-agent-profiles"] ?? {}).sort().join(","), "en,ru,zh");
+
+  const reg = client.registrations.find((r) => r.key === "settings.section");
+  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("Инъекции:"), 2500);
+  console.log("\n【俄语界面（截断 40 行）】\n" + page.lines.slice(0, 40).join("\n"));
+
+  check("俄语界面没被错误边界兜住", page.boundaryCaught === null, String(page.boundaryCaught));
+  check("俄语页整页一个 CJK 都没有", !/[\u3000-\u303f\u4e00-\u9fff\uff01-\uff60]/u.test(page.flat), page.flat.slice(0, 400));
+  for (const needle of ["Профили", "Импорт", "Экспорт", "Восстановить по умолчанию", "Роль"]) {
+    check(`俄语页有「${needle}」`, page.flat.includes(needle), page.flat.slice(0, 600));
+  }
+  const ruChips = outline(callComponent(reg.component, {}).tree, (p) => p.className === "ap-chip").matched
+    .map((p) => p.children);
+  check("6 个模板按钮都是俄语", JSON.stringify(ruChips) === JSON.stringify([
+    "Инженер", "Редактор", "Переводчик", "Продакт-менеджер", "Аналитик данных", "Партнёр по учёбе",
+  ]), JSON.stringify(ruChips));
+  activeLocale = "zh";
+}
+
+// ── 场景 14：语言不认识 → 回落中文，不是空串、不是键名 ────────
+{
+  activeLocale = "de-DE";
+  currentFetch = (url) => {
+    if (String(url).includes("/__ap/state")) {
+      return Promise.resolve({
+        json: () => Promise.resolve({ ok: true, state: serverState, meta: serverMeta }),
+      });
+    }
+    return Promise.reject(new Error(`unexpected fetch ${url}`));
+  };
+  const client = await loadClient();
+  const reg = client.registrations.find((r) => r.key === "settings.section");
+  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("注入统计"), 2500);
+  check("未知语言不抛错", page.threw === undefined, String(page.threw?.stack ?? page.threw));
+  check("未知语言回落中文界面", page.flat.includes("配置列表") && page.flat.includes("恢复默认"), page.flat.slice(0, 400));
+  check(
+    "未知语言页面上没有裸键名（说明走的不是 bind 的 key 兜底）",
+    ["list.title", "editor.save", "field.role"].every((key) => page.flat.includes(key) === false),
+    page.flat.slice(0, 400),
+  );
+  check("未知语言页面没有空的标签", page.flat.includes('"名称"') && page.flat.includes('"角色设定"'));
+  activeLocale = "zh";
+}
+
+// ── 场景 15：切语言不丢正在编辑的内容 ───────────────────────
+// 语言是宿主侧的开关，但草稿在组件的 state 里。切语言只该换文案，
+// 不该把用户刚敲进去的字清掉 —— 这一点只有真的改一次值再重渲染才验得到。
+{
+  activeLocale = "zh";
+  currentFetch = (url) => {
+    if (String(url).includes("/__ap/state")) {
+      return Promise.resolve({
+        json: () => Promise.resolve({ ok: true, state: serverState, meta: serverMeta }),
+      });
+    }
+    return Promise.reject(new Error(`unexpected fetch ${url}`));
+  };
+  const client = await loadClient();
+  const reg = client.registrations.find((r) => r.key === "settings.section");
+  await renderUntil(reg.component, (acc) => acc.flat.includes("注入统计"), 2500);
+
+  const roleField = outline(callComponent(reg.component, {}).tree, (p) => p.className === "ap-textarea").matched[0];
+  check("找到「角色设定」的文本框", roleField !== undefined);
+  if (roleField !== undefined) {
+    roleField.onChange({ target: { value: "Проверка переключения языка" } });
+    const zhAfter = await renderUntil(reg.component, (acc) => acc.flat.includes("Проверка переключения языка"));
+    check("中文界面里刚输入的值在", zhAfter.flat.includes('value="Проверка переключения языка"'));
+
+    activeLocale = "ru";
+    const ruAfter = await renderUntil(reg.component, (acc) => acc.flat.includes('value="Проверка переключения языка"'));
+    check("切到俄语后输入的值还在", ruAfter.flat.includes('value="Проверка переключения языка"'), ruAfter.flat.slice(0, 500));
+    check("切到俄语后标签跟着变了", ruAfter.flat.includes('"Роль"'), ruAfter.flat.slice(0, 400));
+    // ⚠ 数据本身是中文的（serverState），所以这里只断言**界面标签**换了语言。
+    check(
+      "切到俄语后中文界面标签消失了",
+      ruAfter.flat.includes('"角色设定"') === false && ruAfter.flat.includes('"名称"') === false,
+      ruAfter.flat.slice(0, 400),
+    );
+    check("切语言后组件仍然没被错误边界兜住", ruAfter.boundaryCaught === null, String(ruAfter.boundaryCaught));
+    activeLocale = "zh";
+  }
+}
+
+// ── 场景 16：i18n 这一步不改版面 ────────────────────────────
+// 两个提交要能分开评审：第一个提交只该换文字，不该动结构。
+// 这里把「字段的集合与顺序」钉住，第二个提交会显式改掉这组断言 ——
+// 改的时候必须是有意的，而不是顺手。
+{
+  activeLocale = "zh";
+  currentFetch = (url) => {
+    if (String(url).includes("/__ap/state")) {
+      return Promise.resolve({
+        json: () => Promise.resolve({ ok: true, state: serverState, meta: serverMeta }),
+      });
+    }
+    return Promise.reject(new Error(`unexpected fetch ${url}`));
+  };
+  const client = await loadClient();
+  const reg = client.registrations.find((r) => r.key === "settings.section");
+  const page = await renderUntil(reg.component, (acc) => acc.flat.includes("注入统计"), 2500);
+
+  const labels = outline(callComponent(reg.component, {}).tree, (p) => p.className === "ap-label").matched
+    .map((p) => p.children)
+    .filter((child) => typeof child === "string");
+  eq(
+    "表单字段的集合与顺序没变（角色 → 性格 → 说话 → 准则 → 注入开关 → 记忆摘要 → 记忆条目）",
+    labels.join("|"),
+    "角色设定|性格特点|说话习惯|行为准则|将记忆注入到每次会话|长期记忆摘要|记忆条目",
+  );
+  check("仍然是左右分栏（列表 + 编辑区）", page.flat.includes(".ap-split") && page.flat.includes(".ap-list") && page.flat.includes(".ap-editor"), page.flat.slice(0, 300));
+  check("左栏仍然列着三套配置", page.flat.includes(".ap-item") && page.flat.includes("编程助手"));
+  check("底部信息区仍在页面上（存储位置 + 注入统计）", page.flat.includes("存储位置") && page.flat.includes("注入统计"));
 }
 
 // ── 结果 ────────────────────────────────────────────────────
