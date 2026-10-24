@@ -18,6 +18,7 @@
     "lib/index.js",
     "lib/store.js",
     "lib/prompt.js",
+    "lib/prompt-i18n.js",
     "lib/routes.js",
     "lib/memory.js",
     "lib/client.js",
